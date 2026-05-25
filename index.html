@@ -3460,9 +3460,6 @@ function detectCandlePatterns(candles) {
 // 이치모쿠 (9/26/52)
 function computeIchimoku(closes, highs, lows) {
   if (!closes || closes.length < 52 || !highs || !lows) return null;
-  const mid = (arr, n) => (Math.max(...arr.slice(-n)) + Math.min(...arr.slice(-n))) / 2;
-  const tenkan  = mid(highs.map((h,i)=>[h,lows[i]]).reduce((a,[h])=>a.concat(h),[]),9);
-  const kijun   = mid(highs.map((h,i)=>[h,lows[i]]).reduce((a,[h])=>a.concat(h),[]),26);
   const hArr9   = highs.slice(-9), lArr9=lows.slice(-9);
   const hArr26  = highs.slice(-26), lArr26=lows.slice(-26);
   const hArr52  = highs.slice(-52), lArr52=lows.slice(-52);
@@ -3739,7 +3736,9 @@ function ChartAnalysisPanel({ backendUrl, apiKey, watchlist = [], setWatchlist }
     try {
       const cache = JSON.parse(localStorage.getItem(STORAGE_KEYS.ANALYSIS_CACHE) || '{}');
       const entry = cache[code];
-      if (entry && Date.now() - entry.cachedAt < 3600000) return entry.data;
+      // lScore 필드 존재 확인으로 구버전 캐시(enrichAnalysisResult 적용 전) 자동 폐기
+      if (entry && Date.now() - entry.cachedAt < 3600000
+          && entry.data?.lScore != null) return entry.data;
     } catch {}
     return null;
   };
@@ -5836,7 +5835,8 @@ function StockScannerPanel({ backendUrl, apiKey, watchlist = [], setWatchlist })
     },
     volRatio: r.vol_ratio,
     macd: null, bb: null,
-    fundamentals: { per:0, pbr:0, eps:0, bps:0 },
+    fundamentals: { per:0, pbr:0, eps:0, bps:0, ...(r.fundamentals || {}) },
+    mdd: r.mdd ?? null,
   }));
 
   async function runScan() {
@@ -5854,13 +5854,23 @@ function StockScannerPanel({ backendUrl, apiKey, watchlist = [], setWatchlist })
       const startData = await startR.json();
       if (startData.error) throw new Error(startData.error);
 
-      // 2. 폴링 루프 (3초 간격)
+      // 2. 폴링 루프 (3초 간격, 최대 200회=10분 타임아웃)
       let isRunning = true;
-      while (isRunning) {
+      let pollCount = 0;
+      let errorCount = 0;
+      const MAX_POLLS = 200;            // 200 × 3s = 10분
+      const MAX_CONSECUTIVE_ERRORS = 3; // 연속 3회 실패 시 중단
+      while (isRunning && pollCount < MAX_POLLS) {
+        pollCount++;
         await new Promise(res => setTimeout(res, 3000));
         try {
           const statusR = await fetch(`${backendUrl}/api/scan/status`);
-          if (!statusR.ok) continue;
+          if (!statusR.ok) {
+            errorCount++;
+            if (errorCount >= MAX_CONSECUTIVE_ERRORS) { isRunning = false; }
+            continue;
+          }
+          errorCount = 0; // 성공 시 연속 오류 카운터 초기화
           const st = await statusR.json();
           setProgress({ done: st.progress || 0, total: st.total || 0 });
 
@@ -5875,9 +5885,13 @@ function StockScannerPanel({ backendUrl, apiKey, watchlist = [], setWatchlist })
           isRunning = !!st.running;
           if (st.error) throw new Error(st.error);
         } catch (innerE) {
-          // 폴링 오류는 무시하고 계속
-          isRunning = false;
+          errorCount++;
+          if (errorCount >= MAX_CONSECUTIVE_ERRORS) { isRunning = false; }
+          // 일시적 오류는 재시도, 연속 3회 실패 시에만 중단
         }
+      }
+      if (pollCount >= MAX_POLLS) {
+        alert('스캔 타임아웃 (10분 초과). 지금까지 수집된 결과를 표시합니다.');
       }
 
       // 3. 최종 결과
