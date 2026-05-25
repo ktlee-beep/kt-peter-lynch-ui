@@ -3357,6 +3357,9 @@ function ChartAnalysisPanel({ backendUrl, apiKey, watchlist = [], setWatchlist }
   const [newsLoading, setNewsLoading] = useState(false);
   const [fromCache, setFromCache] = useState(false);
   const [weeklyData, setWeeklyData] = useState(null);
+  const [reportData, setReportData] = useState(null);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
   const [stockNotes, setStockNotesState] = useState(() => {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.STOCK_NOTES) || '{}'); }
     catch { return {}; }
@@ -3409,6 +3412,20 @@ function ChartAnalysisPanel({ backendUrl, apiKey, watchlist = [], setWatchlist }
 
   const analyze = (forceRefresh = false) => {
     runAnalysis(code, forceRefresh);
+  };
+
+  const fetchReport = async () => {
+    const targetCode = (result?.code || code || '').trim().replace(/^A/, '');
+    if (!targetCode || !backendUrl) return;
+    setReportLoading(true);
+    try {
+      const r = await fetch(`${backendUrl}/api/report/${targetCode}`);
+      if (r.ok) {
+        const d = await r.json();
+        if (!d.error) { setReportData(d); setReportOpen(true); }
+      }
+    } catch {}
+    setReportLoading(false);
   };
 
   const runAnalysis = async (targetCode, forceRefresh = false) => {
@@ -4433,6 +4450,17 @@ function ChartAnalysisPanel({ backendUrl, apiKey, watchlist = [], setWatchlist }
             </div>
           )}
         </div>
+
+        {/* 📄 리서치 리포트 버튼 */}
+        <button
+          onClick={fetchReport}
+          disabled={reportLoading}
+          className="w-full bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 border border-zinc-700 rounded-2xl py-3.5 text-sm font-semibold text-zinc-200 flex items-center justify-center gap-2 transition disabled:opacity-50"
+        >
+          {reportLoading
+            ? <><span className="inline-block animate-spin">⏳</span> 리포트 생성 중 (10~20초)...</>
+            : <>📄 리서치 리포트 생성</>}
+        </button>
       </div>
     );
   };
@@ -4596,6 +4624,177 @@ function ChartAnalysisPanel({ backendUrl, apiKey, watchlist = [], setWatchlist }
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ─── 리서치 리포트 모달 ─── */}
+      {reportOpen && reportData && (
+        <div className="fixed inset-0 z-50 flex flex-col" onClick={() => setReportOpen(false)}>
+          {/* 배경 오버레이 */}
+          <div className="flex-1 bg-black/60 backdrop-blur-sm"/>
+          {/* 하단 시트 */}
+          <div
+            className="bg-zinc-950 border-t border-zinc-800 rounded-t-3xl max-h-[85vh] overflow-y-auto"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* 핸들 + 헤더 */}
+            <div className="sticky top-0 bg-zinc-950 pt-3 pb-2 px-4 border-b border-zinc-800/60 z-10">
+              <div className="w-10 h-1 bg-zinc-700 rounded-full mx-auto mb-3"/>
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-white font-bold text-base">{reportData.name}</span>
+                  <span className="text-zinc-500 text-xs ml-2">{reportData.code} · {reportData.market}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-bold px-2.5 py-1 rounded-lg ${
+                    reportData.rating === '매수' ? 'bg-red-900/60 text-red-300' :
+                    reportData.rating === '적극매수' ? 'bg-orange-900/60 text-orange-300' :
+                    'bg-zinc-800 text-zinc-400'
+                  }`}>{reportData.rating}</span>
+                  <button onClick={() => setReportOpen(false)} className="text-zinc-500 hover:text-white text-xl px-1">×</button>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 space-y-4 pb-8">
+              {/* 핵심 수치 그리드 */}
+              <div className="grid grid-cols-3 gap-2">
+                <div className="bg-zinc-900 rounded-xl p-3 text-center">
+                  <div className="text-zinc-500 text-[10px]">현재가</div>
+                  <div className="text-white font-bold font-mono text-sm mt-0.5">{fmt(reportData.current_price)}</div>
+                </div>
+                <div className="bg-red-950/40 border border-red-900/40 rounded-xl p-3 text-center">
+                  <div className="text-zinc-500 text-[10px]">목표주가</div>
+                  <div className="text-red-300 font-bold font-mono text-sm mt-0.5">{fmt(reportData.target_price)}</div>
+                  <div className="text-red-500 text-[10px]">+{reportData.upside_pct}%</div>
+                </div>
+                <div className="bg-blue-950/30 border border-blue-900/30 rounded-xl p-3 text-center">
+                  <div className="text-zinc-500 text-[10px]">손절가</div>
+                  <div className="text-blue-300 font-bold font-mono text-sm mt-0.5">{fmt(reportData.stop_loss)}</div>
+                  <div className="text-blue-500 text-[10px]">-{reportData.downside_pct}%</div>
+                </div>
+              </div>
+
+              {/* R/R + 종합점수 */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 flex items-center gap-3">
+                  <div>
+                    <div className="text-zinc-500 text-[10px]">리스크/리워드</div>
+                    <div className="text-white font-bold text-lg mt-0.5">1 : {reportData.rr_ratio}</div>
+                  </div>
+                  <div className={`ml-auto text-2xl ${reportData.rr_ratio >= 2 ? 'text-emerald-400' : reportData.rr_ratio >= 1.5 ? 'text-yellow-400' : 'text-zinc-500'}`}>
+                    {reportData.rr_ratio >= 2 ? '◎' : reportData.rr_ratio >= 1.5 ? '○' : '△'}
+                  </div>
+                </div>
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 flex items-center gap-3">
+                  <div>
+                    <div className="text-zinc-500 text-[10px]">종합 점수</div>
+                    <div className={`font-bold text-lg mt-0.5 ${reportData.score >= 80 ? 'text-red-400' : reportData.score >= 65 ? 'text-yellow-400' : 'text-zinc-400'}`}>
+                      {reportData.score}점
+                    </div>
+                  </div>
+                  <div className="ml-auto">
+                    <div className="w-10 h-10 rounded-full border-2 flex items-center justify-center text-xs font-bold"
+                      style={{borderColor: reportData.score >= 80 ? '#ef4444' : reportData.score >= 65 ? '#eab308' : '#52525b',
+                              color: reportData.score >= 80 ? '#ef4444' : reportData.score >= 65 ? '#eab308' : '#71717a'}}>
+                      /100
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 기술 분석 */}
+              <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 space-y-2.5">
+                <div className="text-white font-semibold text-sm">기술적 분석</div>
+                {[
+                  { label: '주봉 신호', value: reportData.signal, highlight: reportData.signal === '매수신호' || reportData.signal === '안착확인' },
+                  { label: '이평선 배열', value: reportData.alignment },
+                  { label: '장기 추세', value: reportData.long_trend || '-' },
+                  { label: 'RSI (14일)', value: reportData.rsi ? `${reportData.rsi} ${reportData.rsi < 30 ? '— 과매도' : reportData.rsi > 70 ? '— 과매수' : '— 적정'}` : '-' },
+                  { label: 'MACD 크로스', value: reportData.macd_cross === 'golden' ? '골든크로스 ▲' : reportData.macd_cross === 'dead' ? '데드크로스 ▼' : '없음' },
+                  { label: 'ATR (변동폭)', value: reportData.atr ? `${fmt(reportData.atr)}원` : '-' },
+                ].map((row, i) => (
+                  <div key={i} className="flex items-center justify-between py-1 border-b border-zinc-800/40 last:border-0">
+                    <span className="text-zinc-500 text-xs">{row.label}</span>
+                    <span className={`text-xs font-semibold ${row.highlight ? 'text-emerald-400' : 'text-zinc-200'}`}>{row.value}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* 이동평균선 */}
+              <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 space-y-2">
+                <div className="text-white font-semibold text-sm">이동평균선</div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {[
+                    { label: '5주선', val: reportData.ma5w, above: reportData.above5w },
+                    { label: '40주선', val: reportData.ma40w, above: reportData.above40w },
+                    { label: 'MA20', val: reportData.ma20, above: reportData.current_price > (reportData.ma20 || 0) },
+                    { label: 'MA60', val: reportData.ma60, above: reportData.current_price > (reportData.ma60 || 0) },
+                  ].filter(m => m.val).map((m, i) => (
+                    <div key={i} className={`rounded-lg p-2 flex items-center justify-between ${m.above ? 'bg-emerald-950/30 border border-emerald-900/30' : 'bg-zinc-950 border border-zinc-800'}`}>
+                      <span className="text-zinc-500 text-xs">{m.label}</span>
+                      <div className="text-right">
+                        <div className="text-xs font-mono font-bold text-white">{fmt(m.val)}</div>
+                        <div className={`text-[10px] ${m.above ? 'text-emerald-500' : 'text-red-500'}`}>{m.above ? '▲ 상회' : '▼ 하회'}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* 수급 + 가격레벨 */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 space-y-1.5">
+                  <div className="text-white text-xs font-semibold">수급</div>
+                  <div className="flex justify-between text-xs"><span className="text-zinc-500">거래량 비율</span><span className={`font-bold ${reportData.vol_ratio >= 2 ? 'text-red-400' : reportData.vol_ratio >= 1.2 ? 'text-yellow-400' : 'text-zinc-400'}`}>{reportData.vol_ratio}배</span></div>
+                  <div className="flex justify-between text-xs"><span className="text-zinc-500">20일 평균</span><span className="text-zinc-300">{(reportData.avg_vol_20d / 10000).toFixed(1)}만주</span></div>
+                </div>
+                <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 space-y-1.5">
+                  <div className="text-white text-xs font-semibold">52주 가격</div>
+                  {reportData.high_52w && <div className="flex justify-between text-xs"><span className="text-zinc-500">최고</span><span className="text-red-300 font-mono">{fmt(reportData.high_52w)}</span></div>}
+                  {reportData.low_52w && <div className="flex justify-between text-xs"><span className="text-zinc-500">최저</span><span className="text-blue-300 font-mono">{fmt(reportData.low_52w)}</span></div>}
+                </div>
+              </div>
+
+              {/* 리스크 요인 */}
+              <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 space-y-2">
+                <div className="text-white font-semibold text-sm">리스크 요인</div>
+                <div className="space-y-1.5 text-xs text-zinc-400">
+                  <div>▪ 5주선({fmt(reportData.ma5w)}원) 하향 이탈 시 손절 고려</div>
+                  <div>▪ 시장 전체 하락 시 동반 하락 위험</div>
+                  {!reportData.above40w && <div className="text-yellow-500">▪ 40주선 하회 중 — 중장기 하락 구조 가능</div>}
+                  {reportData.rsi > 70 && <div className="text-orange-400">▪ RSI {reportData.rsi} — 단기 과열, 조정 가능성</div>}
+                  {reportData.vol_ratio > 5 && <div className="text-orange-400">▪ 거래량 {reportData.vol_ratio}배 — 차익실현 물량 주의</div>}
+                  {(reportData.alignment === '역배열' || reportData.alignment === '부분역배열') && <div className="text-red-400">▪ 이평선 역배열 — 추세 전환 확인 전 분할매수 권고</div>}
+                </div>
+              </div>
+
+              {/* DART 공시 */}
+              {reportData.recent_disclosures && reportData.recent_disclosures.length > 0 && (
+                <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 space-y-2">
+                  <div className="text-white font-semibold text-sm">최근 공시 (90일)</div>
+                  <div className="space-y-1">
+                    {reportData.recent_disclosures.map((d, i) => {
+                      const dt = d.date || '';
+                      const dtFmt = dt.length === 8 ? `${dt.slice(0,4)}.${dt.slice(4,6)}.${dt.slice(6,8)}` : dt;
+                      return (
+                        <div key={i} className="flex items-start gap-2 text-xs py-1 border-b border-zinc-800/40 last:border-0">
+                          <span className="text-zinc-600 shrink-0">{dtFmt}</span>
+                          <span className="text-zinc-300">{d.title}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* 면책 문구 */}
+              <div className="text-[10px] text-zinc-600 text-center leading-relaxed px-2">
+                ※ 본 리포트는 기술적 분석 기반 자동 생성 리포트입니다.<br/>
+                투자 판단의 최종 책임은 투자자 본인에게 있습니다.
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
