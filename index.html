@@ -19,7 +19,7 @@ var _krxBase = {};
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="KT 트레이딩">
 
-<link rel="manifest" href='data:application/manifest+json,{"name":"KT 트레이딩 v2.0","short_name":"KT 트레이딩","description":"빨강글씨+리버모어+피터린치 통합 시스템","start_url":"./","display":"standalone","orientation":"portrait","background_color":"%230a0a0a","theme_color":"%230a0a0a","icons":[{"src":"data:image/svg%2Bxml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 192 192%22%3E%3Crect width=%22192%22 height=%22192%22 rx=%2236%22 fill=%22%230a0a0a%22/%3E%3Cpath d=%22M48 144V48l24 28 24-28 24 28 24-28v96%22 fill=%22none%22 stroke=%22%23ef4444%22 stroke-width=%2210%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E%3C/svg%3E","sizes":"192x192","type":"image/svg+xml"},{"src":"data:image/svg%2Bxml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 512 512%22%3E%3Crect width=%22512%22 height=%22512%22 rx=%2296%22 fill=%22%230a0a0a%22/%3E%3Cpath d=%22M128 384V128l64 75 64-75 64 75 64-75v256%22 fill=%22none%22 stroke=%22%23ef4444%22 stroke-width=%2226%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/%3E%3C/svg%3E","sizes":"512x512","type":"image/svg+xml"}]}'>
+<link rel="manifest" href="./manifest.json">
 <link rel="icon" type="image/svg+xml" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="36" fill="%230a0a0a"/><path d="M48 144V48l24 28 24-28 24 28 24-28v96" fill="none" stroke="%23ef4444" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/></svg>'>
 <link rel="apple-touch-icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="36" fill="%230a0a0a"/><path d="M48 144V48l24 28 24-28 24 28 24-28v96" fill="none" stroke="%23ef4444" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/></svg>'>
 
@@ -3148,8 +3148,12 @@ function CandleChart({ data, width = 340, height = 220, ma5 = [], ma20 = [], ma6
   const candleW = Math.max(2, stepX * 0.65);
 
   const allPrices = data.flatMap(d => [d.h, d.l]).concat(ma5, ma20, ma60).filter(v => v && !isNaN(v));
-  if (bb) { allPrices.push(bb.upper, bb.lower); }
+  if (bb && bb.upper && bb.lower && !isNaN(bb.upper) && !isNaN(bb.lower)) {
+    allPrices.push(bb.upper, bb.lower);
+  }
+  if (allPrices.length === 0) return <div className="h-48 flex items-center justify-center text-zinc-600 text-sm">가격 데이터 없음</div>;
   const minP = Math.min(...allPrices), maxP = Math.max(...allPrices);
+  if (!isFinite(minP) || !isFinite(maxP)) return <div className="h-48 flex items-center justify-center text-zinc-600 text-sm">가격 데이터 없음</div>;
   const rangeP = maxP - minP || 1;
   const yP = v => padding.top + chartH - ((v - minP) / rangeP) * chartH;
   const xC = i => padding.left + i * stepX + stepX / 2;
@@ -3216,6 +3220,7 @@ function CandleChart({ data, width = 340, height = 220, ma5 = [], ma20 = [], ma6
           const isUp = (d.c ?? d.close) >= (d.o ?? d.open);
           const color = isUp ? '#ef4444' : '#3b82f6';
           const hi = d.h ?? d.high, lo = d.l ?? d.low, op = d.o ?? d.open, cl = d.c ?? d.close;
+          if (!hi || !lo || !op || !cl || isNaN(hi) || isNaN(lo) || isNaN(op) || isNaN(cl)) return null;
           return (
             <g key={i}>
               <line x1={x} x2={x} y1={yP(hi)} y2={yP(lo)} stroke={color} strokeWidth="1"/>
@@ -3765,9 +3770,17 @@ function ChartAnalysisPanel({ backendUrl, apiKey, watchlist = [], setWatchlist }
     const trimCode = (targetCode || '').trim().replace(/^A/, '');
     if (!trimCode) { setError('종목명을 입력하면 자동으로 검색됩니다'); return; }
 
-    // 네이버 실시간 가격 병렬 조회 (백엔드 없어도 동작)
+    // 실시간 가격 조회 (백엔드 /api/quotes → CORS 없이 안전)
     setNaverData(null);
-    fetchNaverStock(trimCode).then(nd => { if (nd) setNaverData(nd); });
+    if (backendUrl) {
+      fetch(`${backendUrl}/api/quotes?codes=${trimCode}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          const q = data?.quotes?.[0];
+          if (q && q.price) setNaverData({ price: q.price, changeRate: q.changeRate, name: q.name });
+        })
+        .catch(() => {});
+    }
 
     if (!backendUrl) { setError('설정 → 실시간 탭에서 백엔드 URL을 먼저 입력하세요.'); return; }
 
