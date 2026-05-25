@@ -3317,6 +3317,331 @@ function MACDPanel({ macd, width = 340, height = 80 }) {
   );
 }
 
+// ════════════════════════════════════════════════════════════════
+// 고급 기술 지표 프론트엔드 연산 (백엔드 미포함 지표 보완)
+// ════════════════════════════════════════════════════════════════
+
+// Stochastic %K / %D
+function computeStochastic(closes, highs, lows, period=14, dPeriod=3) {
+  if (!closes || closes.length < period || !highs || !lows) return null;
+  const kValues = [];
+  for (let i = period - 1; i < closes.length; i++) {
+    const hSlice = highs.slice(i - period + 1, i + 1);
+    const lSlice = lows.slice(i - period + 1, i + 1);
+    const hh = Math.max(...hSlice), ll = Math.min(...lSlice);
+    const k = (hh === ll) ? 50 : (closes[i] - ll) / (hh - ll) * 100;
+    kValues.push(k);
+  }
+  const dValues = [];
+  for (let i = dPeriod - 1; i < kValues.length; i++) {
+    dValues.push(kValues.slice(i - dPeriod + 1, i + 1).reduce((a,b)=>a+b,0) / dPeriod);
+  }
+  const k = kValues[kValues.length-1] ?? 50;
+  const d = dValues[dValues.length-1] ?? 50;
+  const kPrev = kValues[kValues.length-2] ?? k;
+  const dPrev = dValues[dValues.length-2] ?? d;
+  let signal = 'neutral';
+  if (k < 20) signal = 'oversold';
+  else if (k > 80) signal = 'overbought';
+  else if (k > d && kPrev <= dPrev) signal = 'bullish_cross';
+  else if (k < d && kPrev >= dPrev) signal = 'bearish_cross';
+  return { k: Math.round(k*10)/10, d: Math.round(d*10)/10, signal };
+}
+
+// Williams %R
+function computeWilliamsR(closes, highs, lows, period=14) {
+  if (!closes || closes.length < period || !highs || !lows) return null;
+  const hh = Math.max(...highs.slice(-period));
+  const ll = Math.min(...lows.slice(-period));
+  const c = closes[closes.length-1];
+  const wr = (hh === ll) ? -50 : (hh - c) / (hh - ll) * -100;
+  let signal = 'neutral';
+  if (wr <= -80) signal = 'oversold';
+  else if (wr >= -20) signal = 'overbought';
+  return { value: Math.round(wr*10)/10, signal };
+}
+
+// OBV (On-Balance Volume)
+function computeOBV(closes, vols) {
+  if (!closes || closes.length < 10 || !vols) return null;
+  let obv = 0;
+  const arr = [];
+  for (let i = 0; i < closes.length; i++) {
+    if (i === 0) { arr.push(0); continue; }
+    if (closes[i] > closes[i-1]) obv += (vols[i]||0);
+    else if (closes[i] < closes[i-1]) obv -= (vols[i]||0);
+    arr.push(obv);
+  }
+  const n = arr.length;
+  const avg5  = arr.slice(-5).reduce((a,b)=>a+b,0)/5;
+  const avg10 = arr.slice(-10,-5).reduce((a,b)=>a+b,0)/5;
+  const trend = avg5 > avg10 * 1.02 ? 'accumulating' : avg5 < avg10 * 0.98 ? 'distributing' : 'neutral';
+  return { value: obv, trend };
+}
+
+// ATR (Average True Range 14)
+function computeATR(candles, period=14) {
+  if (!candles || candles.length < period+1) return null;
+  const trs = [];
+  for (let i = 1; i < candles.length; i++) {
+    const h=candles[i].h, l=candles[i].l, pc=candles[i-1].c;
+    trs.push(Math.max(h-l, Math.abs(h-pc), Math.abs(l-pc)));
+  }
+  const recent = trs.slice(-period);
+  return Math.round(recent.reduce((a,b)=>a+b,0)/recent.length);
+}
+
+// Fibonacci 되돌림 레벨
+function computeFibonacci(closes, highs, lows, high52w, low52w) {
+  if (!closes || !highs || !lows) return null;
+  const recentH = Math.max(high52w||0, ...highs.slice(-60));
+  const recentL = Math.min(low52w||Infinity, ...lows.slice(-60));
+  if (recentH <= recentL || !isFinite(recentL)) return null;
+  const range = recentH - recentL;
+  const cur = closes[closes.length-1];
+  const levels = {
+    r0: recentL, r236: recentL+range*0.236, r382: recentL+range*0.382,
+    r500: recentL+range*0.5, r618: recentL+range*0.618,
+    r786: recentL+range*0.786, r100: recentH,
+  };
+  let nearestLevel='r500', nearestDist=Infinity;
+  for (const [k,v] of Object.entries(levels)) {
+    const dist=Math.abs(cur-v);
+    if (dist<nearestDist){nearestDist=dist; nearestLevel=k;}
+  }
+  return { levels, nearestLevel };
+}
+
+// RSI 다이버전스 (간이)
+function computeRsiDivergence(closes, rsi) {
+  if (!closes || closes.length < 20 || rsi==null) return { bullish:false, bearish:false };
+  const recent = closes.slice(-10);
+  const prev   = closes.slice(-20,-10);
+  const priceDown  = recent[recent.length-1] < prev[prev.length-1];
+  const priceUp    = recent[recent.length-1] > prev[prev.length-1];
+  const lowerLow   = Math.min(...recent) < Math.min(...prev);
+  const higherHigh = Math.max(...recent) > Math.max(...prev);
+  return {
+    bullish: lowerLow   && rsi > 38 && rsi < 55, // 가격 신저점, RSI는 유지
+    bearish: higherHigh && rsi > 45 && rsi < 65,  // 가격 신고점, RSI는 약화
+  };
+}
+
+// 캔들 패턴 탐지
+function detectCandlePatterns(candles) {
+  if (!candles || candles.length < 2) return [];
+  const pats = [];
+  const c = candles[candles.length-1];
+  const p = candles[candles.length-2];
+  const body = Math.abs(c.c - c.o);
+  const range = c.h - c.l;
+  const lower = Math.min(c.c,c.o) - c.l;
+  const upper = c.h - Math.max(c.c,c.o);
+  if (range > 0) {
+    // 해머
+    if (lower >= body*2 && upper < body*0.5 && c.c > c.o)
+      pats.push({name:'해머', signal:'bullish', desc:'하락 후 매수세 복귀'});
+    // 슈팅스타
+    if (upper >= body*2 && lower < body*0.5 && c.c < c.o)
+      pats.push({name:'슈팅스타', signal:'bearish', desc:'상승 후 매도세 복귀'});
+    // 도지
+    if (body/range < 0.1)
+      pats.push({name:'도지', signal:'neutral', desc:'방향 탐색 중'});
+    // 강세 장악형
+    if (p.c < p.o && c.c > c.o && c.o < p.c && c.c > p.o)
+      pats.push({name:'강세장악형', signal:'bullish', desc:'전일 음봉을 완전히 삼킨 양봉'});
+    // 약세 장악형
+    if (p.c > p.o && c.c < c.o && c.o > p.c && c.c < p.o)
+      pats.push({name:'약세장악형', signal:'bearish', desc:'전일 양봉을 완전히 삼킨 음봉'});
+  }
+  return pats;
+}
+
+// 이치모쿠 (9/26/52)
+function computeIchimoku(closes, highs, lows) {
+  if (!closes || closes.length < 52 || !highs || !lows) return null;
+  const mid = (arr, n) => (Math.max(...arr.slice(-n)) + Math.min(...arr.slice(-n))) / 2;
+  const tenkan  = mid(highs.map((h,i)=>[h,lows[i]]).reduce((a,[h])=>a.concat(h),[]),9);
+  const kijun   = mid(highs.map((h,i)=>[h,lows[i]]).reduce((a,[h])=>a.concat(h),[]),26);
+  const hArr9   = highs.slice(-9), lArr9=lows.slice(-9);
+  const hArr26  = highs.slice(-26), lArr26=lows.slice(-26);
+  const hArr52  = highs.slice(-52), lArr52=lows.slice(-52);
+  const ten9    = (Math.max(...hArr9)  + Math.min(...lArr9)) / 2;
+  const kij26   = (Math.max(...hArr26) + Math.min(...lArr26)) / 2;
+  const senkA   = (ten9 + kij26) / 2;
+  const senkB   = (Math.max(...hArr52) + Math.min(...lArr52)) / 2;
+  const price   = closes[closes.length-1];
+  const top     = Math.max(senkA, senkB);
+  const bot     = Math.min(senkA, senkB);
+  const priceVsCloud = price > top ? 'above' : price < bot ? 'below' : 'in_cloud';
+  return { tenkan:Math.round(ten9), kijun:Math.round(kij26), senkouA:Math.round(senkA), senkouB:Math.round(senkB), priceVsCloud };
+}
+
+// 리버모어(기술) 점수 계산
+function computeLScore(d, stochastic, obv, ichimoku, williamsR, rsiDivergence, candlePatterns) {
+  let score = 0;
+  const reasons = [];
+  const { ma5=0, ma20=0, ma60=0, rsi, macd, bb, volRatio=0 } = d;
+  const maAligned = ma5 > ma20 && ma20 > ma60;
+  const maReverse = ma5 < ma20 && ma20 < ma60;
+  // MA 정배열 (25점)
+  if (maAligned)      { score += 25; reasons.push('정배열 (5MA>20MA>60MA)'); }
+  else if (maReverse) { score -= 10; reasons.push('역배열 (진입 금지)'); }
+  else if (ma5 > ma20){ score += 8;  reasons.push('단기선 우위'); }
+  // RSI (15점)
+  if (rsi != null) {
+    if (rsi >= 45 && rsi <= 65) { score += 15; reasons.push(`RSI ${rsi.toFixed(0)} 이상적`); }
+    else if (rsi < 30)           { score += 10; reasons.push(`RSI ${rsi.toFixed(0)} 과매도 반등`); }
+    else if (rsi > 75)           { score -= 5; }
+  }
+  // MACD (15점)
+  if (macd?.lastCross === 'golden') { score += 15; reasons.push('MACD 골든크로스'); }
+  else if (macd?.lastCross === 'dead') { score -= 10; reasons.push('MACD 데드크로스'); }
+  // 거래량 (10점)
+  if (volRatio >= 3)        { score += 10; reasons.push(`거래량 ${volRatio.toFixed(1)}배 폭증`); }
+  else if (volRatio >= 1.5) { score += 5;  reasons.push(`거래량 ${volRatio.toFixed(1)}배`); }
+  // BB (8점)
+  if (bb?.percentB < 20)  { score += 8; reasons.push('볼린저 하단 → 반등 기대'); }
+  else if (bb?.percentB > 80) { score -= 5; }
+  // 스토캐스틱 (8점)
+  if (stochastic?.signal === 'oversold' || stochastic?.signal === 'bullish_cross') { score += 8; reasons.push('스토캐스틱 매수'); }
+  else if (stochastic?.signal === 'overbought') { score -= 5; }
+  // OBV (8점)
+  if (obv?.trend === 'accumulating')  { score += 8; reasons.push('OBV 매집 — 세력 유입'); }
+  else if (obv?.trend === 'distributing') { score -= 8; }
+  // 이치모쿠 (5점)
+  if (ichimoku?.priceVsCloud === 'above')  { score += 5; reasons.push('이치모쿠 구름 위'); }
+  else if (ichimoku?.priceVsCloud === 'below') { score -= 8; }
+  // Williams %R (5점)
+  if (williamsR?.signal === 'oversold')  { score += 5; reasons.push('Williams %R 과매도'); }
+  else if (williamsR?.signal === 'overbought') { score -= 3; }
+  // RSI 다이버전스 (7점)
+  if (rsiDivergence?.bullish)  { score += 7; reasons.push('RSI 강세 다이버전스'); }
+  else if (rsiDivergence?.bearish) { score -= 5; }
+  // 캔들 (5점)
+  const bullC = (candlePatterns||[]).filter(p=>p.signal==='bullish');
+  if (bullC.length > 0) { score += 5; reasons.push(`캔들: ${bullC[0].name}`); }
+  score = Math.max(0, Math.min(100, score));
+  const lGrade = score>=80?'🏆 추천':score>=65?'🟢 후보':score>=50?'🟡 관찰':'🔴 제외';
+  return { lScore: score, lGrade, lReasons: reasons };
+}
+
+// 피터 린치(펀더멘털) 점수 계산
+function computePScore(fund, dart) {
+  let score = 0;
+  const reasons = [];
+  if (!fund) return { pScore: 0, pGrade: '🔴 제외', pReasons: ['재무 데이터 없음'] };
+  const { per=0, pbr=0, eps=0, bps=0 } = fund;
+  // PER (30점)
+  if (per > 0 && per <= 10)       { score += 30; reasons.push(`PER ${per.toFixed(1)} 매우 저평가`); }
+  else if (per > 0 && per <= 15)  { score += 20; reasons.push(`PER ${per.toFixed(1)} 저평가`); }
+  else if (per > 0 && per <= 25)  { score += 10; reasons.push(`PER ${per.toFixed(1)} 적정`); }
+  else if (per > 25)              { reasons.push(`PER ${per.toFixed(1)} 고평가`); }
+  else                            { reasons.push('PER 없음 (적자 또는 미상장)'); }
+  // PBR (25점)
+  if (pbr > 0 && pbr < 1)        { score += 25; reasons.push(`PBR ${pbr.toFixed(2)} 청산가치 이하`); }
+  else if (pbr >= 1 && pbr < 2)  { score += 15; reasons.push(`PBR ${pbr.toFixed(2)} 적정`); }
+  else if (pbr >= 2 && pbr < 3)  { score += 5; }
+  // EPS (20점)
+  if (eps > 0)       { score += 20; reasons.push(`EPS ₩${eps.toLocaleString()} 흑자`); }
+  else if (eps < 0)  { reasons.push('EPS 적자'); }
+  // DART 재무
+  if (dart?.revenueGrowth >= 20) { score += 15; reasons.push(`매출 +${dart.revenueGrowth.toFixed(0)}% 고성장`); }
+  else if (dart?.revenueGrowth >= 10) { score += 8; reasons.push(`매출 +${dart.revenueGrowth.toFixed(0)}%`); }
+  if (dart?.opMargin >= 15) { score += 10; reasons.push(`영업이익률 ${dart.opMargin.toFixed(1)}%`); }
+  else if (dart?.opMargin >= 5) { score += 5; }
+  score = Math.min(100, score);
+  const pGrade = score>=75?'🏆 추천':score>=55?'🟢 후보':score>=35?'🟡 관찰':'🔴 제외';
+  return { pScore: score, pGrade, pReasons: reasons };
+}
+
+// 복합 매수/매도 신호 (csig)
+function computeCombinedSignal(d, lScore, pScore, stochastic, ichimoku, obv, candlePatterns) {
+  const { ma5=0, ma20=0, ma60=0, rsi, macd, bb, volRatio=0 } = d;
+  const totalBuyCriteria=12, totalSellCriteria=10;
+  let buy=0, sell=0;
+  const maAligned = ma5>ma20 && ma20>ma60;
+  const maReverse = ma5<ma20 && ma20<ma60;
+  if (maAligned) buy++; if (ma5>ma20) buy++;
+  if (rsi!=null && rsi>=40 && rsi<=65) buy++;
+  if (rsi!=null && rsi<35) buy++;
+  if (macd?.lastCross==='golden') buy++;
+  if (bb?.percentB < 30) buy++;
+  if (volRatio >= 2) buy++;
+  if (stochastic?.signal==='oversold'||stochastic?.signal==='bullish_cross') buy++;
+  if (ichimoku?.priceVsCloud==='above') buy++;
+  if (obv?.trend==='accumulating') buy++;
+  const bullC=(candlePatterns||[]).filter(p=>p.signal==='bullish');
+  if (bullC.length>0) buy++;
+  if (lScore>=65) buy++;
+  if (maReverse) sell++;
+  if (rsi!=null && rsi>75) sell++;
+  if (macd?.lastCross==='dead') sell++;
+  if (bb?.percentB>80) sell++;
+  if (stochastic?.signal==='overbought') sell++;
+  if (ichimoku?.priceVsCloud==='below') sell++;
+  if (obv?.trend==='distributing') sell++;
+  const bearC=(candlePatterns||[]).filter(p=>p.signal==='bearish');
+  if (bearC.length>0) sell++;
+  if (lScore<35) sell++;
+  if (pScore<25) sell++;
+  buy=Math.min(buy,totalBuyCriteria); sell=Math.min(sell,totalSellCriteria);
+  const br=buy/totalBuyCriteria, sr=sell/totalSellCriteria;
+  let signal='HOLD', confidence=50;
+  if (br>=0.5 && br>sr*1.5)      { signal='BUY';  confidence=Math.round(br*100); }
+  else if (sr>=0.5 && sr>br*1.5) { signal='SELL'; confidence=Math.round(sr*100); }
+  else                            { confidence=Math.round((1-Math.abs(br-sr))*55+25); }
+  confidence=Math.max(30,Math.min(95,confidence));
+  return { signal, confidence, buyPoints:buy, sellPoints:sell, totalBuyCriteria, totalSellCriteria };
+}
+
+// 분석 결과 강화 (백엔드 미포함 지표 보완)
+function enrichAnalysisResult(d) {
+  const candles = d.candles || [];
+  const closes  = candles.map(c=>c.c);
+  const highs   = candles.map(c=>c.h);
+  const lows    = candles.map(c=>c.l);
+  const vols    = candles.map(c=>c.v);
+  const stochastic    = computeStochastic(closes, highs, lows);
+  const williamsR     = computeWilliamsR(closes, highs, lows);
+  const obv           = computeOBV(closes, vols);
+  const atr           = computeATR(candles);
+  const fibonacci     = computeFibonacci(closes, highs, lows, d.high52w, d.low52w);
+  const rsiDivergence = computeRsiDivergence(closes, d.rsi);
+  const candlePatterns= detectCandlePatterns(candles.slice(-5));
+  const ichimoku      = computeIchimoku(closes, highs, lows);
+  const deviation     = (d.ma20 && d.currentPrice) ? (d.currentPrice - d.ma20) / d.ma20 * 100 : null;
+  const { lScore, lGrade, lReasons } = computeLScore(d, stochastic, obv, ichimoku, williamsR, rsiDivergence, candlePatterns);
+  const { pScore, pGrade, pReasons } = computePScore(d.fundamentals, d.dart);
+  const combinedSignal = computeCombinedSignal(d, lScore, pScore, stochastic, ichimoku, obv, candlePatterns);
+  // 지원/저항선 (단순: 최근 20일 고점/저점)
+  const recentHighs = highs.slice(-20);
+  const recentLows  = lows.slice(-20);
+  const support     = recentLows.length  ? Math.min(...recentLows)  : null;
+  const resistance  = recentHighs.length ? Math.max(...recentHighs) : null;
+  const mdd = (() => {
+    if (closes.length < 5) return null;
+    let peak=closes[0], maxDD=0;
+    for (const c of closes) { if(c>peak) peak=c; const dd=(peak-c)/peak*100; if(dd>maxDD) maxDD=dd; }
+    return Math.round(maxDD*10)/10;
+  })();
+  const close = d.currentPrice || d.close;
+  const ma20arr = d.ma20arr || [];
+  const high52w = d.high52w; const low52w = d.low52w;
+  const range52 = (high52w||0) - (low52w||0);
+  const pos52 = range52>0 ? Math.round(((close-(low52w||0))/range52)*100) : 50;
+  return {
+    ...d,
+    stochastic, williamsR, obv, atr, fibonacci, rsiDivergence,
+    candlePatterns, ichimoku, deviation, lScore, lGrade, lReasons,
+    pScore, pGrade, pReasons, combinedSignal, support, resistance, mdd,
+    score: lScore, // 통합 점수
+    close: close,
+  };
+}
+
+// ════════════════════════════════════════════════════════════════
+
 // 네이버 금융 직접 조회 (CORS 허용 시 백엔드 없이 실시간 가격)
 async function fetchNaverStock(code) {
   const endpoints = [
@@ -3471,7 +3796,8 @@ function ChartAnalysisPanel({ backendUrl, apiKey, watchlist = [], setWatchlist }
           .catch(() => {}),
       ]);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const d = await r.json();
+      const raw = await r.json();
+      const d = enrichAnalysisResult(raw);
       setResult(d);
       saveToCache(trimCode, d);
       fetchNews(trimCode, d.corpCode || '', d.name || '');
@@ -5480,46 +5806,90 @@ function StockScannerPanel({ backendUrl, apiKey, watchlist = [], setWatchlist })
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [mode, setMode] = useState('livermore'); // livermore | lynch | all
 
+  // 백엔드 스캔 결과를 스캐너 표시 형식으로 변환
+  const normalizeScanResults = (results) => (results||[]).map(r => ({
+    ...r,
+    close: r.price,
+    currentPrice: r.price,
+    changeRate: 0,
+    sector: r.sector || corpCodeMap[r.code]?.sector || '기타',
+    // 점수 매핑 (스캐너 고유 점수 → lScore/pScore)
+    lScore: r.score,
+    pScore: Math.max(0, Math.min(100, Math.round(r.score * 0.8))),
+    lGrade: r.score>=80?'🏆 추천':r.score>=65?'🟢 후보':r.score>=50?'🟡 관찰':'🔴 제외',
+    pGrade: r.score>=75?'🏆 추천':r.score>=60?'🟢 후보':r.score>=45?'🟡 관찰':'🔴 제외',
+    lReasons: [
+      r.signal  ? `주봉: ${r.signal}`          : '',
+      r.above5w  ? '5주선 위 안착'              : '',
+      r.above40w ? '40주선 위 (장기대세)'        : '',
+      r.rsi      ? `RSI ${(r.rsi||0).toFixed(0)}`:'',
+      r.vol_ratio >= 1.5 ? `거래량 ${(r.vol_ratio||0).toFixed(1)}배` : '',
+    ].filter(Boolean),
+    pReasons: [],
+    combinedSignal: {
+      signal: r.score>=70?'BUY':r.score<45?'SELL':'HOLD',
+      confidence: r.score,
+      buyPoints: Math.round(r.score/10),
+      sellPoints: r.score<45?Math.round((100-r.score)/15):0,
+      totalBuyCriteria: 10,
+      totalSellCriteria: 10,
+    },
+    volRatio: r.vol_ratio,
+    macd: null, bb: null,
+    fundamentals: { per:0, pbr:0, eps:0, bps:0 },
+  }));
+
   async function runScan() {
     if (!backendUrl) { alert('설정 → 실시간 탭에서 백엔드 URL을 먼저 입력해주세요.'); return; }
     setScanning(true); setResults([]);
 
-    // /api/movers로 오늘의 전종목 활성 후보 동적 조회
-    let stocks;
     try {
-      const mr = await fetch(`${backendUrl}/api/movers`);
-      const md = await mr.json();
-      if (md.candidates?.length) {
-        stocks = md.candidates.map(s => ({
-          ...s,
-          sector: corpCodeMap[s.code]?.sector || '기타',
-          corp:   corpCodeMap[s.code]?.corp   || '',
-        }));
-      }
-    } catch {}
-    if (!stocks) stocks = Object.entries(corpCodeMap).map(([code, info]) => ({ code, ...info }));
+      // 1. 백엔드 전종목 스캔 시작
+      const startR = await fetch(`${backendUrl}/api/scan/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ min_score: 60, markets: ['KOSPI','KOSDAQ'], quick: true }),
+      });
+      if (!startR.ok) throw new Error('스캔 시작 실패 (백엔드 오류)');
+      const startData = await startR.json();
+      if (startData.error) throw new Error(startData.error);
 
-    setProgress({ done: 0, total: stocks.length });
-    const BATCH = 5; const all = [];
-    for (let i = 0; i < stocks.length; i += BATCH) {
-      const batch = stocks.slice(i, i + BATCH);
-      const fetched = await Promise.all(batch.map(async s => {
+      // 2. 폴링 루프 (3초 간격)
+      let isRunning = true;
+      while (isRunning) {
+        await new Promise(res => setTimeout(res, 3000));
         try {
-          const dartParam = apiKey ? `&dartKey=${encodeURIComponent(apiKey)}` : '';
-          const corpParam = s.corp ? `&corp=${s.corp}` : '';
-          const sectorParam = s.sector ? `&sector=${encodeURIComponent(s.sector)}` : '';
-          const r = await fetch(`${backendUrl}/api/analysis?code=${s.code}${corpParam}${sectorParam}${dartParam}`);
-          if (!r.ok) return null;
-          const d = await r.json();
-          if (d.error) return null;
-          return { ...s, ...d, name: s.name || d.name, market: s.market || d.market };
-        } catch { return null; }
-      }));
-      const valid = fetched.filter(Boolean);
-      all.push(...valid);
-      setProgress(p => ({ ...p, done: Math.min(i + BATCH, stocks.length) }));
-      setResults([...all]);
+          const statusR = await fetch(`${backendUrl}/api/scan/status`);
+          if (!statusR.ok) continue;
+          const st = await statusR.json();
+          setProgress({ done: st.progress || 0, total: st.total || 0 });
+
+          // 중간 결과 업데이트
+          if ((st.results_count || 0) > 0) {
+            const midR = await fetch(`${backendUrl}/api/scan/results`);
+            if (midR.ok) {
+              const midData = await midR.json();
+              if (midData.results?.length > 0) setResults(normalizeScanResults(midData.results));
+            }
+          }
+          isRunning = !!st.running;
+          if (st.error) throw new Error(st.error);
+        } catch (innerE) {
+          // 폴링 오류는 무시하고 계속
+          isRunning = false;
+        }
+      }
+
+      // 3. 최종 결과
+      const finalR = await fetch(`${backendUrl}/api/scan/results`);
+      if (finalR.ok) {
+        const finalData = await finalR.json();
+        setResults(normalizeScanResults(finalData.results || []));
+      }
+    } catch (e) {
+      alert(`전종목 스캔 오류: ${e.message}\n\n백엔드 URL을 확인하거나 잠시 후 다시 시도하세요.`);
     }
+
     setScanning(false);
   }
 
